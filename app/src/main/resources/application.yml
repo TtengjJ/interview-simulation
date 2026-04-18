@@ -9,11 +9,6 @@ logging:
 server:
   port: 8080
   # 明确指定HTTP响应编码
-  servlet:
-    encoding:
-      charset: UTF-8
-      enabled: true
-      force: true
 
 # SpringDoc OpenAPI / Swagger配置
 springdoc:
@@ -42,7 +37,7 @@ spring:
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:interview_guide}
     username: ${POSTGRES_USER:postgres}
     # 与根目录 docker-compose.yml 中 postgres 服务默认一致（本地只起依赖容器 + bootRun 时无需改）
-    password: ${POSTGRES_PASSWORD:password}
+    password: ${POSTGRES_PASSWORD:123456}
     driver-class-name: org.postgresql.Driver
 
   jpa:
@@ -59,6 +54,10 @@ spring:
       enabled: true
       max-file-size: 50MB  # 支持知识库上传（简历限制在业务层检查）
       max-request-size: 50MB
+    encoding:
+      enabled: true
+      charset: UTF-8
+      force: true
   
 
   # Redisson配置 (使用 spring.redis.redisson，参考官方文档)
@@ -67,6 +66,7 @@ spring:
       config: |
         singleServerConfig:
           address: "redis://${REDIS_HOST:localhost}:${REDIS_PORT:6379}"
+          password: ${REDIS_PASSWORD:redis}
           database: 0
           connectionMinimumIdleSize: 10
           connectionPoolSize: 64
@@ -159,8 +159,8 @@ app:
   # RustFS (S3兼容) 存储配置
   storage:
     endpoint: ${APP_STORAGE_ENDPOINT:http://localhost:9000}
-    access-key: ${APP_STORAGE_ACCESS_KEY:minioadmin}
-    secret-key: ${APP_STORAGE_SECRET_KEY:minioadmin}
+    access-key: ${RUSTFS_ACCESS_KEY:rustfsadmin}
+    secret-key: ${RUSTFS_SECRET_KEY:rustfsadmin}
     bucket: ${APP_STORAGE_BUCKET:interview-guide}
     region: ${APP_STORAGE_REGION:us-east-1}
   

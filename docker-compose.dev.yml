@@ -29,6 +29,8 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
