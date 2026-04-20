@@ -20,24 +20,30 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Qwen TTS Realtime Service (WebSocket-based)
  *
- * Provides real-time text-to-speech synthesis using Alibaba Cloud DashScope's
- * qwen-tts-realtime model via WebSocket API.
+ * 阿里云通义千问实时语音合成服务
+ * <p>
+ * 基于 WebSocket 协议实现低延迟文本转语音（TTS），支持流式音频块接收。
+ * </p>
  *
- * Key Features:
- * - WebSocket-based real-time TTS synthesis
- * - User-commit mode for manual control
- * - Synchronous synthesis API with 30-second timeout protection
- * - Automatic audio chunk collection via response.audio.delta events
- * - Support for Chinese language with configurable voice, speech rate, and volume
+ * 核心特性：
+ * <ul>
+ *   <li><b>WebSocket 实时连接</b>：建立长连接，避免每次请求重复握手开销</li>
+ *   <li><b>同步阻塞接口</b>：通过 CountDownLatch 等待合成完成，超时保护 30 秒</li>
+ *   <li><b>音频块收集</b>：自动累积 response.audio.delta 事件中的 Base64 音频片段</li>
+ *   <li><b>参数可配置</b>：音色、语速、音量、采样率等均通过 VoiceInterviewProperties 配置</li>
+ * </ul>
  *
- * Configuration:
- * - Model: qwen-tts-realtime
- * - Voice: Configurable (Cherry, Serena, Ethan, etc.)
- * - Audio format: PCM, 24kHz sample rate
- * - Mode: commit (user-controlled)
+ * 工作流程：
+ * <ol>
+ *   <li>创建 WebSocket 连接并注册回调</li>
+ *   <li>发送 session.update 配置会话参数（音色、格式等）</li>
+ *   <li>调用 appendText() + commit() 触发合成</li>
+ *   <li>在 onEvent 回调中接收 audio.delta 音频块并累积</li>
+ *   <li>收到 response.done 后释放 CountDownLatch，返回完整 PCM 数据</li>
+ * </ol>
  *
- * @see QwenTtsRealtime
- * @see QwenTtsRealtimeCallback
+ * @see QwenTtsRealtime DashScope SDK 实时 TTS 客户端
+ * @see QwenTtsRealtimeCallback WebSocket 事件回调接口
  */
 @Slf4j
 @Service
@@ -92,17 +98,20 @@ public class QwenTtsService {
     }
 
     /**
-     * Synthesize text to speech audio.
+     * 将文本合成为 PCM 音频数据
+     * <p>
+     * 该方法通过 DashScope WebSocket API 同步执行 TTS 合成：
+     * <ol>
+     *   <li>建立 WebSocket 连接到阿里云服务</li>
+     *   <li>发送文本并触发合成（commit 模式）</li>
+     *   <li>在回调中收集音频块（Base64 解码）</li>
+     *   <li>通过 CountDownLatch 等待合成完成（最多 30 秒）</li>
+     *   <li>返回完整的 PCM 音频字节数组</li>
+     * </ol>
+     * </p>
      *
-     * This method synchronously converts text to PCM audio data using the DashScope
-     * WebSocket-based TTS API. It establishes a WebSocket connection, sends the text for
-     * synthesis, collects audio chunks, and returns the complete audio data.
-     *
-     * The method uses CountDownLatch to wait for synthesis completion with a 30-second
-     * timeout to prevent indefinite blocking.
-     *
-     * @param text Text to synthesize (null, empty, or whitespace-only text returns empty array)
-     * @return PCM audio data at configured sample rate, or empty array if synthesis fails
+     * @param text 待合成的文本（null、空或纯空格文本返回空数组）
+     * @return PCM 音频数据（24kHz 采样率），合成失败返回空数组
      */
     public byte[] synthesize(String text) {
         // Handle null, empty, or whitespace-only text
@@ -113,26 +122,29 @@ public class QwenTtsService {
 
         log.debug("Starting TTS synthesis for text: {} characters", text.length());
 
-        // Latch for synchronous waiting
+        // ① 初始化同步等待锁（CountDownLatch）
+        // 用于阻塞当前线程，直到 TTS 合成完成或超时
         CountDownLatch synthesisLatch = new CountDownLatch(1);
 
-        // Container for collected audio data
+        // ② 音频数据容器（线程安全）
+        // 用于累积从 WebSocket 回调中收到的音频块
         ByteArrayContainer audioContainer = new ByteArrayContainer();
 
-        // Error container
+        // ③ 错误引用容器
+        // 用于在回调线程和主线程之间传递异常信息
         AtomicReference<Throwable> errorRef = new AtomicReference<>();
 
-        // Response ID container for tracking
+        // ④ 响应 ID 容器（用于追踪和日志）
         AtomicReference<String> responseIdRef = new AtomicReference<>();
 
         try {
-            // Build QwenTtsRealtimeParam with connection settings
+            // 步骤 1：构建 WebSocket 连接参数
             QwenTtsRealtimeParam param = QwenTtsRealtimeParam.builder()
-                    .model(model)
-                    .apikey(apiKey)
+                    .model(model)      // 模型名称：qwen-tts-realtime
+                    .apikey(apiKey)    // API Key 认证
                     .build();
 
-            // Create callback handler for WebSocket events
+            // 步骤 2：创建 WebSocket 事件回调处理器
             QwenTtsRealtimeCallback callback = new QwenTtsRealtimeCallback() {
                 @Override
                 public void onOpen() {
@@ -141,46 +153,48 @@ public class QwenTtsService {
 
                 @Override
                 public void onEvent(JsonObject message) {
+                    // 处理服务端推送的事件（音频块、完成信号、错误等）
                     handleServerEvent(message, audioContainer, synthesisLatch, errorRef, responseIdRef);
                 }
 
                 @Override
                 public void onClose(int code, String reason) {
                     log.debug("TTS WebSocket closed - code: {}, reason: {}", code, reason);
+                    // 连接关闭时释放锁，防止主线程永久阻塞
                     synthesisLatch.countDown();
                 }
             };
 
-            // Create QwenTtsRealtime instance
+            // 步骤 3：创建 TTS 客户端实例
             QwenTtsRealtime qwenTtsRealtime = new QwenTtsRealtime(param, callback);
 
             try {
-                // Connect to server (blocking)
+                // 步骤 4：建立 WebSocket 连接（阻塞操作）
                 qwenTtsRealtime.connect();
 
-                // Configure session with TTS parameters
+                // 步骤 5：配置会话参数（音色、音频格式、语速等）
                 QwenTtsRealtimeConfig config = QwenTtsRealtimeConfig.builder()
-                        .voice(voice)
-                        .responseFormat(getAudioFormat())
-                        .mode(mode)  // "commit" mode
-                        .languageType(languageType)
-                        .speechRate(speechRate)
-                        .volume(volume)
+                        .voice(voice)                          // 音色：Cherry/Serena/Ethan 等
+                        .responseFormat(getAudioFormat())      // 音频格式：PCM_24000HZ_MONO_16BIT
+                        .mode(mode)                            // 模式："commit"（用户手动触发）
+                        .languageType(languageType)            // 语言类型：zh（中文）
+                        .speechRate(speechRate)                // 语速：1.0 为标准速度
+                        .volume(volume)                        // 音量：0-100
                         .build();
 
-                // Update session with configuration
+                // 步骤 6：更新会话配置
                 qwenTtsRealtime.updateSession(config);
 
                 log.info("[TTS] Session configured with voice: {}, triggering synthesis for text (length: {})",
                          voice, text.length());
 
-                // Send text for synthesis using commit mode
-                qwenTtsRealtime.appendText(text);
-                qwenTtsRealtime.commit();
+                // 步骤 7：发送文本并触发合成
+                qwenTtsRealtime.appendText(text);  // 追加文本到缓冲区
+                qwenTtsRealtime.commit();          // 提交并触发合成
 
                 log.info("[TTS] Text sent to TTS service, waiting for audio response...");
 
-                // Wait for synthesis completion with timeout
+                // 步骤 8：等待合成完成（最多 30 秒）
                 boolean completed = synthesisLatch.await(30, TimeUnit.SECONDS);
 
                 if (!completed) {
@@ -245,20 +259,23 @@ public class QwenTtsService {
     }
 
     /**
-     * Handle server events from the DashScope TTS service.
+     * 处理 DashScope TTS 服务端推送的事件
+     * <p>
+     * 支持的事件类型：
+     * <ul>
+     *   <li><b>session.created</b>：会话创建成功</li>
+     *   <li><b>session.updated</b>：会话配置更新完成</li>
+     *   <li><b>response.audio.delta</b>：收到音频块（Base64 编码），需解码并累积</li>
+     *   <li><b>response.done</b>：合成完成，释放 CountDownLatch</li>
+     *   <li><b>error</b>：发生错误，记录异常并释放锁</li>
+     * </ul>
+     * </p>
      *
-     * This method processes various event types:
-     * - session.created: Session successfully created
-     * - session.updated: Session configuration updated
-     * - response.audio.delta: Audio chunk received
-     * - response.done: Response completed
-     * - error: Error occurred
-     *
-     * @param message JSON event message from server
-     * @param audioContainer Container for collecting audio chunks
-     * @param synthesisLatch Latch to signal completion
-     * @param errorRef Container for error tracking
-     * @param responseIdRef Container for response ID tracking
+     * @param message JSON 格式的事件消息
+     * @param audioContainer 音频块累积容器
+     * @param synthesisLatch 同步等待锁
+     * @param errorRef 异常引用容器
+     * @param responseIdRef 响应 ID 引用容器
      */
     private void handleServerEvent(JsonObject message, ByteArrayContainer audioContainer,
                                     CountDownLatch synthesisLatch, AtomicReference<Throwable> errorRef,
@@ -285,21 +302,23 @@ public class QwenTtsService {
                     break;
 
                 case "response.audio.delta":
-                    // Audio chunk received - delta is a base64 string directly
+                    // 收到音频块事件：delta 字段为 Base64 编码的 PCM 数据
                     if (message.has("delta")) {
                         String audioBase64 = message.get("delta").getAsString();
                         if (audioBase64 != null && !audioBase64.isEmpty()) {
+                            // Base64 解码为原始 PCM 字节数组
                             byte[] audioChunk = Base64.getDecoder().decode(audioBase64);
-                            audioContainer.append(audioChunk);
+                            audioContainer.append(audioChunk);  // 累积到容器
                             log.trace("Received audio chunk - {} bytes", audioChunk.length);
                         }
                     }
                     break;
 
                 case "response.done":
-                    // Response completed - this is the final event in Qwen TTS API
+                    // 合成完成事件：这是 Qwen TTS API 的最终信号
                     String responseId = responseIdRef.get();
                     log.debug("TTS response completed - responseId: {}", responseId);
+                    // 释放 CountDownLatch，唤醒主线程
                     synthesisLatch.countDown();
                     break;
 
@@ -340,9 +359,14 @@ public class QwenTtsService {
     }
 
     /**
-     * Internal class for efficiently collecting audio chunks.
-     * Uses ByteArrayOutputStream for amortized O(1) append performance
-     * instead of O(n²) copying with manual array growth.
+     * 内部类：高效收集音频块的容器
+     * <p>
+     * 使用 ByteArrayOutputStream 实现摊销 O(1) 的追加性能，
+     * 避免手动数组扩容导致的 O(n²) 复制开销。
+     * </p>
+     * <p>
+     * <b>线程安全</b>：所有方法使用 synchronized 修饰，支持多线程并发写入
+     * </p>
      */
     private static class ByteArrayContainer {
         private final java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
