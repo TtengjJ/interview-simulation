@@ -29,15 +29,24 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * Voice Interview Service
- * 语音面试服务
+ * 语音面试会话管理服务
  * <p>
- * Provides business logic for voice interview session management including:
- * - Session lifecycle management (create, end, retrieve)
- * - Phase transitions and state tracking
- * - Message persistence and conversation history
- * - Redis caching for active sessions
+ * 负责语音面试会话的完整生命周期管理，包括：
+ * <ul>
+ *   <li><b>会话创建</b>：初始化会话状态、配置面试角色和阶段、生成 WebSocket URL</li>
+ *   <li><b>状态流转</b>：阶段切换（自我介绍→技术面→项目面→HR面）、暂停/恢复</li>
+ *   <li><b>消息持久化</b>：保存用户语音识别文本和 AI 回复到数据库</li>
+ *   <li><b>缓存优化</b>：使用 Redis 缓存活跃会话，减少数据库查询压力</li>
+ *   <li><b>评估触发</b>：会话结束时通过 Redis Stream 异步触发评估任务</li>
+ * </ul>
  * </p>
+ *
+ * <b>架构定位</b>：
+ * <ul>
+ *   <li>作为业务编排层，协调 Repository、Redis、Stream Producer</li>
+ *   <li>不直接调用 AI 服务（ASR/LLM/TTS），这些由 {@code VoiceInterviewWebSocketHandler} 处理</li>
+ *   <li>专注于数据持久化和状态管理，确保会话数据的 ACID 特性</li>
+ * </ul>
  */
 @Service
 @RequiredArgsConstructor
@@ -56,11 +65,27 @@ public class VoiceInterviewService {
     private static final String DEFAULT_USER_ID = "default";
 
     /**
-     * Create a new voice interview session
      * 创建新的语音面试会话
+     * <p>
+     * 该方法执行以下操作：
+     * <ol>
+     *   <li>根据请求参数构建会话实体（角色类型、难度、启用的面试阶段等）</li>
+     *   <li>设置默认 LLM Provider（从配置文件读取）</li>
+     *   <li>确定第一个启用的面试阶段（优先顺序：INTRO → TECH → PROJECT → HR）</li>
+     *   <li>保存到 PostgreSQL 数据库</li>
+     *   <li>将新会话写入 Redis 缓存（TTL 1 小时）</li>
+     *   <li>生成 WebSocket 连接 URL 并返回给前端</li>
+     * </ol>
+     * </p>
      *
-     * @param request Session creation request with role type and phase configuration
-     * @return SessionResponseDTO with session details and WebSocket URL
+     * <b>事务保证</b>：
+     * <ul>
+     *   <li>使用 {@code @Transactional} 确保会话创建和缓存更新的原子性</li>
+     *   <li>如果缓存失败，数据库回滚，避免脏数据</li>
+     * </ul>
+     *
+     * @param request 会话创建请求（包含技能 ID、难度、自定义 JD、简历 ID、阶段配置等）
+     * @return 会话响应 DTO（包含 sessionId、当前阶段、WebSocket URL）
      */
     @Transactional
     public SessionResponseDTO createSession(CreateSessionRequest request) {
@@ -95,8 +120,23 @@ public class VoiceInterviewService {
     }
 
     /**
-     * 仅当会话处于 IN_PROGRESS 状态时结束，用于 WebSocket 异常断开的兜底。
-     * 正常结束的 endSession 已设为 COMPLETED，此方法不会重复操作。
+     * 强制结束处于 IN_PROGRESS 状态的会话（用于 WebSocket 异常断开的兜底）
+     * <p>
+     * <b>使用场景</b>：
+     * <ul>
+     *   <li>当 WebSocket 连接意外断开（网络故障、浏览器崩溃）时，前端无法主动调用 {@code endSession}</li>
+     *   <li>此时会话仍处于 {@code IN_PROGRESS} 状态，需要后端自动清理</li>
+     *   <li>该方法会检查会话状态，只有处于 {@code IN_PROGRESS} 时才执行结束逻辑</li>
+     * </ul>
+     * </p>
+     *
+     * <b>与正常结束的区别</b>：
+     * <ul>
+     *   <li>正常结束的 {@code endSession(String)} 会将状态设为 {@code COMPLETED}</li>
+     *   <li>此方法不会重复操作已结束的会话，避免多次触发评估任务</li>
+     * </ul>
+     *
+     * @param sessionId 会话 ID（字符串格式）
      */
     @Transactional
     public void endSessionIfInProgress(String sessionId) {
@@ -110,10 +150,27 @@ public class VoiceInterviewService {
     }
 
     /**
-     * End interview session and update status
-     * 结束面试会话并更新状态
+     * 结束面试会话并触发异步评估
+     * <p>
+     * 该方法执行以下操作：
+     * <ol>
+     *   <li>解析会话 ID 并从数据库加载会话实体</li>
+     *   <li>设置结束时间、实际时长、状态为 {@code COMPLETED}</li>
+     *   <li>将会话当前阶段标记为 {@code COMPLETED}</li>
+     *   <li>更新评估状态为 {@code PENDING}（等待异步评估）</li>
+     *   <li>保存到数据库并清除 Redis 缓存</li>
+     *   <li>通过 {@code VoiceEvaluateStreamProducer} 发送评估任务到 Redis Stream</li>
+     * </ol>
+     * </p>
      *
-     * @param sessionId Session ID (String format, will be converted to Long)
+     * <b>异步评估机制</b>：
+     * <ul>
+     *   <li>评估任务不在此处同步执行，而是通过 Redis Stream 解耦</li>
+     *   <li>消费者（{@code VoiceEvaluateStreamConsumer}）会在后台异步调用 LLM 生成评估报告</li>
+     *   <li>避免阻塞主线程，提升用户体验</li>
+     * </ul>
+     *
+     * @param sessionId 会话 ID（字符串格式，内部转换为 Long）
      */
     @Transactional
     public void endSession(String sessionId) {
@@ -144,11 +201,25 @@ public class VoiceInterviewService {
     }
 
     /**
-     * Get session by ID with Redis cache fallback
-     * 通过ID获取会话，支持Redis缓存
+     * 通过 ID 获取会话实体（支持 Redis 缓存降级）
+     * <p>
+     * 查询策略：
+     * <ol>
+     *   <li><b>优先查缓存</b>：从 Redis 中获取会话对象（Key: {@code voice:interview:session:{id}}）</li>
+     *   <li><b>缓存未命中</b>：从 PostgreSQL 数据库查询</li>
+     *   <li><b>自动回填</b>：数据库查询结果会自动写入缓存（在 {@code getSession(Long)} 中实现）</li>
+     * </ol>
+     * </p>
      *
-     * @param sessionId Session ID (String format, will be converted to Long)
-     * @return VoiceInterviewSessionEntity or null if not found
+     * <b>性能优化</b>：
+     * <ul>
+     *   <li>活跃会话的查询几乎全部命中缓存，减少数据库压力</li>
+     *   <li>缓存 TTL 为 1 小时，过期后自动失效</li>
+     *   <li>会话状态变更时会主动清除缓存（{@code invalidateSessionCache}）</li>
+     * </ul>
+     *
+     * @param sessionId 会话 ID（字符串格式）
+     * @return 会话实体，不存在则返回 null
      */
     public VoiceInterviewSessionEntity getSession(String sessionId) {
         return getSession(parseSessionId(sessionId));
@@ -181,11 +252,26 @@ public class VoiceInterviewService {
     }
 
     /**
-     * Start a new interview phase
      * 开始新的面试阶段
+     * <p>
+     * 用于在面试过程中动态切换阶段（例如从 INTRO 切换到 TECH）。
+     * 阶段切换会触发以下操作：
+     * <ol>
+     *   <li>验证阶段名称的合法性（必须是 INTRO/TECH/PROJECT/HR 之一）</li>
+     *   <li>更新会话的 {@code currentPhase} 字段</li>
+     *   <li>保存到数据库并更新 Redis 缓存</li>
+     *   <li>记录日志以便追踪阶段流转历史</li>
+     * </ol>
+     * </p>
      *
-     * @param sessionId Session ID (String format)
-     * @param phaseStr  Phase as string (INTRO, TECH, PROJECT, HR)
+     * <b>注意事项</b>：
+     * <ul>
+     *   <li>该方法不验证阶段切换的合理性（例如不能从 HR 跳回 INTRO），由调用方保证</li>
+     *   <li>阶段信息会嵌入到 LLM Prompt 中，影响 AI 面试官的提问策略</li>
+     * </ul>
+     *
+     * @param sessionId 会话 ID（字符串格式）
+     * @param phaseStr  阶段名称字符串（如 "TECH"）
      */
     @Transactional
     public void startPhase(String sessionId, String phaseStr) {
@@ -226,12 +312,26 @@ public class VoiceInterviewService {
     }
 
     /**
-     * Save dialogue message (user and AI text) to database
-     * 保存对话消息（用户和AI文本）到数据库
+     * 保存对话消息（用户语音识别文本 + AI 回复文本）
+     * <p>
+     * 该方法将一轮完整的问答保存到数据库，包括：
+     * <ol>
+     *   <li>用户说出的内容（经 ASR 识别后的文本）</li>
+     *   <li>AI 生成的回复文本（经 LLM 生成并优化后的文本）</li>
+     *   <li>当前所处的面试阶段（INTRO/TECH/PROJECT/HR）</li>
+     *   <li>消息序列号（用于保持对话顺序）</li>
+     * </ol>
+     * </p>
      *
-     * @param sessionId Session ID (String format)
-     * @param userText  User's recognized speech text
-     * @param aiText    AI's generated response text
+     * <b>数据结构</b>：
+     * <ul>
+     *   <li>一条 {@code VoiceInterviewMessageEntity} 代表一轮问答（一问一答）</li>
+     *   <li>不是每条消息单独存储，而是成对存储，方便后续评估时提取 Q&A 对</li>
+     * </ul>
+     *
+     * @param sessionId 会话 ID（字符串格式）
+     * @param userText  用户语音识别后的文本
+     * @param aiText    AI 生成的回复文本
      */
     @Transactional
     public void saveMessage(String sessionId, String userText, String aiText) {
@@ -288,11 +388,21 @@ public class VoiceInterviewService {
     }
 
     /**
-     * Pause interview session
      * 暂停面试会话
+     * <p>
+     * 用于用户主动暂停或超时自动暂停场景。
+     * 暂停后会记录暂停时间点，但不会清除 Redis 缓存（因为会话仍可能恢复）。
+     * </p>
      *
-     * @param sessionId Session ID
-     * @param reason Pause reason (user_initiated or timeout)
+     * <b>状态校验</b>：
+     * <ul>
+     *   <li>只有处于 {@code IN_PROGRESS} 状态的会话才能被暂停</li>
+     *   <li>如果会话已是 {@code PAUSED} 或 {@code COMPLETED}，抛出业务异常</li>
+     * </ul>
+     *
+     * @param sessionId 会话 ID
+     * @param reason    暂停原因（{@code user_initiated} 或 {@code timeout}）
+     * @throws BusinessException 如果会话状态不允许暂停
      */
     @Transactional
     public void pauseSession(String sessionId, String reason) {
@@ -311,17 +421,34 @@ public class VoiceInterviewService {
         session.setPausedAt(LocalDateTime.now());
 
         sessionRepository.save(session);
+        //Cache-Aside（旁路缓存）写数据库时，主动删缓存，以确保下次读到的一定是最新数据。
         invalidateSessionCache(sessionIdLong);
 
         log.info("Session {} paused, reason: {}", sessionId, reason);
     }
 
     /**
-     * Resume interview session
      * 恢复面试会话
+     * <p>
+     * 从暂停状态恢复到进行中状态，并重新生成 WebSocket URL 供前端重连。
+     * 恢复后会：
+     * <ol>
+     *   <li>更新状态为 {@code IN_PROGRESS}</li>
+     *   <li>记录恢复时间点（用于计算实际面试时长）</li>
+     *   <li>重新写入 Redis 缓存</li>
+     *   <li>返回会话响应 DTO（包含新的 WebSocket URL）</li>
+     * </ol>
+     * </p>
      *
-     * @param sessionId Session ID
-     * @return SessionResponseDTO with WebSocket URL
+     * <b>状态校验</b>：
+     * <ul>
+     *   <li>只有处于 {@code PAUSED} 状态的会话才能被恢复</li>
+     *   <li>如果会话已是 {@code IN_PROGRESS} 或 {@code COMPLETED}，抛出业务异常</li>
+     * </ul>
+     *
+     * @param sessionId 会话 ID
+     * @return 会话响应 DTO（包含 WebSocket URL）
+     * @throws BusinessException 如果会话状态不允许恢复
      */
     @Transactional
     public SessionResponseDTO resumeSession(String sessionId) {
@@ -402,13 +529,26 @@ public class VoiceInterviewService {
     }
 
     /**
-     * Check if session should transition to next phase based on duration and question count
-     * 检查是否应该转换到下一个阶段（基于时长和问题数量）
+     * 检查是否应该转换到下一个面试阶段
+     * <p>
+     * 基于以下三个规则判断是否需要自动切换阶段：
+     * <ol>
+     *   <li><b>规则 1（强制切换）</b>：当前阶段持续时间达到最大时长（{@code maxDuration}）</li>
+     *   <li><b>规则 2（问题数量上限）</b>：已提问数量达到最大问题数（{@code maxQuestions}）</li>
+     *   <li><b>规则 3（建议切换）</b>：达到建议时长且已提问数量达到最小问题数</li>
+     * </ol>
+     * </p>
      *
-     * @param session        Current session
-     * @param phaseStartTime Time when current phase started
-     * @param questionCount  Number of questions asked in current phase
-     * @return true if should transition, false otherwise
+     * <b>配置来源</b>：
+     * <ul>
+     *   <li>各阶段的时长和问题数配置来自 {@code VoiceInterviewProperties}</li>
+     *   <li>例如：INTRO 阶段最小 3 分钟、建议 5 分钟、最大 8 分钟，最少 2 个问题、最多 5 个问题</li>
+     * </ul>
+     *
+     * @param session        当前会话实体
+     * @param phaseStartTime 当前阶段开始时间
+     * @param questionCount  当前阶段已提问数量
+     * @return true 表示应该切换阶段，false 表示继续当前阶段
      */
     public boolean shouldTransitionToNextPhase(VoiceInterviewSessionEntity session,
                                                 LocalDateTime phaseStartTime,
@@ -448,11 +588,20 @@ public class VoiceInterviewService {
     }
 
     /**
-     * Get the next enabled phase after current phase
-     * 获取当前阶段之后的下一个启用的阶段
+     * 获取当前阶段之后的下一个启用阶段
+     * <p>
+     * 根据会话配置中启用的阶段（introEnabled/techEnabled/projectEnabled/hrEnabled），
+     * 按顺序返回下一个应该进入的阶段。
+     * </p>
      *
-     * @param session Current session
-     * @return Next InterviewPhase or COMPLETED if no more phases
+     * <b>阶段流转逻辑</b>：
+     * <pre>
+     * INTRO → TECH → PROJECT → HR → COMPLETED
+     * </pre>
+     * 如果某个阶段被禁用（例如 techEnabled=false），则跳过该阶段。
+     *
+     * @param session 当前会话实体
+     * @return 下一个阶段枚举值，如果没有更多阶段则返回 {@code COMPLETED}
      */
     public VoiceInterviewSessionEntity.InterviewPhase getNextPhase(VoiceInterviewSessionEntity session) {
         VoiceInterviewSessionEntity.InterviewPhase current = session.getCurrentPhase();
