@@ -20,6 +20,7 @@ public class AnalyzeStreamProducer extends AbstractStreamProducer<AnalyzeStreamP
 
     private final ResumeRepository resumeRepository;
 
+    // 分析任务参数
     record AnalyzeTaskPayload(Long resumeId, String content) {}
 
     public AnalyzeStreamProducer(RedisService redisService, ResumeRepository resumeRepository) {

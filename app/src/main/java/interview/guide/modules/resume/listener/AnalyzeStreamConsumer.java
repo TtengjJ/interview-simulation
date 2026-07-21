@@ -125,6 +125,7 @@ public class AnalyzeStreamConsumer extends AbstractStreamConsumer<AnalyzeStreamC
                 AsyncTaskStreamConstants.FIELD_RETRY_COUNT, String.valueOf(retryCount)
             );
 
+            // 重新写入 Stream（作为新消息）
             redisService().streamAdd(
                 AsyncTaskStreamConstants.RESUME_ANALYZE_STREAM_KEY,
                 message,

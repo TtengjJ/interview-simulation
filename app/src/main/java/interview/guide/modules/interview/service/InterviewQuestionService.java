@@ -121,7 +121,7 @@ public class InterviewQuestionService {
             List<HistoricalQuestion> historicalQuestions,
             List<CategoryDTO> customCategories,
             String jdText) {
-
+        // 1. 解析 Skill 获取分类和优先级
         SkillDTO skill = resolveSkill(skillId, customCategories, jdText);
         String difficultyDesc = resolveDifficulty(difficulty);
 
@@ -198,7 +198,9 @@ public class InterviewQuestionService {
                 ErrorCode.INTERVIEW_QUESTION_GENERATION_FAILED,
                 "简历题生成失败：", "简历题", log);
 
+            // 展平为主+追问结构
             List<InterviewQuestionDTO> questions = convertToQuestions(dto);
+            // 按配置截断数量
             questions = capToMainCount(questions, questionCount);
             log.info("简历题生成完成: 请求={}, 实际主问题={}",
                 questionCount, questions.stream().filter(q -> !q.isFollowUp()).count());

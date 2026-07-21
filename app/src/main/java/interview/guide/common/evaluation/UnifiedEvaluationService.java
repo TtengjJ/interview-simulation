@@ -129,11 +129,13 @@ public class UnifiedEvaluationService {
 
         // 合并批次结果
         List<QuestionEvalDTO> mergedEvaluations = mergeQuestionEvaluations(batchResults);
+        // 综合评价拼接
         String fallbackFeedback = mergeOverallFeedback(batchResults);
+        // 优势/改进项去重合并
         List<String> fallbackStrengths = mergeListItems(batchResults, true);
         List<String> fallbackImprovements = mergeListItems(batchResults, false);
 
-        // 二次汇总
+        // 二次汇总,调用 LLM 对分批结果进行全局总结，提升一致性
         SummaryDTO summary = summarizeBatchResults(
             chatClient, sessionId, resumeContext, referenceBaseline, qaRecords,
             mergedEvaluations, fallbackFeedback, fallbackStrengths, fallbackImprovements
@@ -148,14 +150,20 @@ public class UnifiedEvaluationService {
         return resource.getContentAsString(StandardCharsets.UTF_8);
     }
 
-    private List<BatchResult> evaluateInBatches(ChatClient chatClient, String sessionId,
-                                                 String resumeContext, List<QaRecord> qaRecords,
-                                                 String referenceContext) {
+    private List<BatchResult> evaluateInBatches(
+            ChatClient chatClient, String sessionId,
+            String resumeContext, List<QaRecord> qaRecords,
+            String referenceContext) {
         List<BatchResult> results = new ArrayList<>();
+        // 滑动窗口切分：步长 = batchSize (默认8)
         for (int start = 0; start < qaRecords.size(); start += evaluationBatchSize) {
             int end = Math.min(start + evaluationBatchSize, qaRecords.size());
             List<QaRecord> batch = qaRecords.subList(start, end);
-            BatchReportDTO report = evaluateBatch(chatClient, sessionId, resumeContext, referenceContext, batch);
+            // 评估当前批次
+            BatchReportDTO report = evaluateBatch(
+                    chatClient, sessionId, resumeContext, referenceContext, batch
+            );
+            // 记录批次范围 [start, end) 和结果
             results.add(new BatchResult(start, end, report));
         }
         return results;
@@ -164,7 +172,8 @@ public class UnifiedEvaluationService {
     private BatchReportDTO evaluateBatch(ChatClient chatClient, String sessionId,
                                           String resumeContext, String referenceContext,
                                           List<QaRecord> batch) {
-        String qaRecords = buildQARecords(batch);
+        //构建 Prompt 输入
+        String qaRecords = buildQARecords(batch);// 格式化问答对
         String systemPrompt = systemPromptTemplate.render();
 
         Map<String, Object> variables = new HashMap<>();
@@ -174,6 +183,7 @@ public class UnifiedEvaluationService {
             (referenceContext != null && !referenceContext.isBlank()) ? referenceContext : "无");
         String userPrompt = userPromptTemplate.render(variables);
 
+        //附加 JSON 格式约束
         String systemPromptWithFormat = systemPrompt + "\n\n" + outputConverter.getFormat();
         try {
             return structuredOutputInvoker.invoke(
@@ -203,10 +213,12 @@ public class UnifiedEvaluationService {
         List<QuestionEvalDTO> merged = new ArrayList<>();
         for (BatchResult result : batchResults) {
             int expectedSize = result.endIndex() - result.startIndex();
+            // 获取当前批次的评估结果（可能为 null）
             List<QuestionEvalDTO> current =
                 result.report() != null && result.report().questionEvaluations() != null
                     ? result.report().questionEvaluations()
                     : List.of();
+            // 补齐缺失的题目（用 0 分兜底）
             for (int i = 0; i < expectedSize; i++) {
                 if (i < current.size() && current.get(i) != null) {
                     merged.add(current.get(i));
@@ -231,7 +243,7 @@ public class UnifiedEvaluationService {
     }
 
     private List<String> mergeListItems(List<BatchResult> batchResults, boolean strengthsMode) {
-        Set<String> merged = new LinkedHashSet<>();
+        Set<String> merged = new LinkedHashSet<>(); // 保证顺序且去重
         for (BatchResult result : batchResults) {
             BatchReportDTO report = result.report();
             if (report == null) continue;
@@ -268,6 +280,7 @@ public class UnifiedEvaluationService {
                 ErrorCode.INTERVIEW_EVALUATION_FAILED, "总结评估失败：", "总结评估", log
             );
 
+            // 如果 LLM 返回空，使用分批聚合结果
             String feedback = dto != null && dto.overallFeedback() != null && !dto.overallFeedback().isBlank()
                 ? dto.overallFeedback() : fallbackFeedback;
             List<String> strengths = sanitizeItems(dto != null ? dto.strengths() : null, fallbackStrengths);
@@ -275,6 +288,7 @@ public class UnifiedEvaluationService {
             return new SummaryDTO(feedback, strengths, improvements);
         } catch (Exception e) {
             log.warn("二次汇总评估失败，降级到批次聚合结果: sessionId={}, error={}", sessionId, e.getMessage());
+            // 完全降级：直接使用分批合并的结果
             return new SummaryDTO(fallbackFeedback, fallbackStrengths, fallbackImprovements);
         }
     }
@@ -295,18 +309,22 @@ public class UnifiedEvaluationService {
         List<ReferenceAnswer> referenceAnswers = new ArrayList<>();
         Map<String, List<Integer>> categoryScoresMap = new HashMap<>();
 
+        // 统计已答题数（未答题不计入总分）
         long answeredCount = qaRecords.stream()
             .filter(q -> q.userAnswer() != null && !q.userAnswer().isBlank())
             .count();
 
         int evalSize = evaluations != null ? evaluations.size() : 0;
 
+        // 遍历所有题目，组装详情
         for (int i = 0; i < qaRecords.size(); i++) {
             QaRecord q = qaRecords.get(i);
             QuestionEvalDTO eval = i < evalSize ? evaluations.get(i) : null;
 
+            // 未答题强制 0 分
             boolean hasAnswer = q.userAnswer() != null && !q.userAnswer().isBlank();
             int score = hasAnswer && eval != null ? eval.score() : 0;
+            // 提取评估数据（带默认值）
             String feedback = eval != null && eval.feedback() != null
                 ? eval.feedback() : "该题未成功生成评估反馈。";
             String refAnswer = eval != null && eval.referenceAnswer() != null
@@ -314,15 +332,19 @@ public class UnifiedEvaluationService {
             List<String> keyPoints = eval != null && eval.keyPoints() != null
                 ? eval.keyPoints() : List.of();
 
+            // 构建题目详情
             questionDetails.add(new QuestionEvaluation(
                 q.questionIndex(), q.question(), q.category(), q.userAnswer(), score, feedback
             ));
+            // 构建参考答案
             referenceAnswers.add(new ReferenceAnswer(
                 q.questionIndex(), q.question(), refAnswer, keyPoints
             ));
+            // 按类别聚合分数
             categoryScoresMap.computeIfAbsent(q.category(), k -> new ArrayList<>()).add(score);
         }
 
+        // 计算各类别平均分
         List<CategoryScore> categoryScores = categoryScoresMap.entrySet().stream()
             .map(e -> new CategoryScore(
                 e.getKey(),
@@ -331,6 +353,7 @@ public class UnifiedEvaluationService {
             ))
             .collect(Collectors.toList());
 
+        // 计算总分（仅基于已答题）
         int overallScore = answeredCount == 0 ? 0
             : (int) questionDetails.stream().mapToInt(QuestionEvaluation::score).average().orElse(0);
 

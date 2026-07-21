@@ -111,6 +111,7 @@ public class RagChatSessionService {
      */
     @Transactional
     public Long prepareStreamMessage(Long sessionId, String question) {
+        // 加载会话（带知识库关联）
         RagChatSessionEntity session = sessionRepository.findByIdWithKnowledgeBases(sessionId)
             .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "会话不存在"));
 
@@ -163,14 +164,21 @@ public class RagChatSessionService {
      * 获取流式回答（带多轮上下文）
      */
     public Flux<String> getStreamAnswer(Long sessionId, String question) {
+        // ① 加载会话及关联的知识库
         RagChatSessionEntity session = sessionRepository.findByIdWithKnowledgeBases(sessionId)
-            .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "会话不存在"));
+                .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "会话不存在"));
 
+        // ② 提取知识库 ID 列表
         List<Long> kbIds = session.getKnowledgeBaseIds();
+
+        // ③ 加载历史对话（可选，用于多轮上下文）
         List<Message> history = queryProperties.getHistory().isEnabled()
-            ? loadHistoryMessages(sessionId) : List.of();
+                ? loadHistoryMessages(sessionId)
+                : List.of();
 
         log.info("加载历史上下文: sessionId={}, historySize={}", sessionId, history.size());
+
+        // ④ 调用 RAG 查询服务（返回流式响应）
         return queryService.answerQuestionStream(kbIds, question, history);
     }
 

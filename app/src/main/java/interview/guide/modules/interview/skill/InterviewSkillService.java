@@ -30,10 +30,21 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 面试方向 Skill 管理：分类分配、References 注入、自定义 Skill 构建。
+ * 面试方向 Skill 管理服务
+ * <p>
+ * 负责管理不同技术栈（如 Java、Python、算法等）的面试配置与参考资料。
+ * 核心功能包括：
+ * <ul>
+ *   <li><b>Skill 加载</b>：从 classpath:skills/{id}/SKILL.md 解析预设面试官人设</li>
+ *   <li><b>分类映射</b>：建立考核维度（Category）与参考文件（Reference）的关联索引</li>
+ *   <li><b>JD 解析</b>：利用 LLM 从职位描述中提取面试重点并匹配对应的参考知识</li>
+ *   <li><b>Prompt 注入</b>：在面试和评估阶段，动态将相关的 Markdown 参考资料注入到 LLM Prompt 中</li>
+ * </ul>
+ * </p>
  *
- * 与 SkillsTool 互补：SkillsTool 负责 LLM 按需加载 persona（SKILL.md body），
- * 本类负责后端解析分类配置（skill.meta.yml）并批量注入 references 到 Prompt。
+ * <b>架构定位</b>：
+ * 与 SkillsTool 互补。SkillsTool 负责在运行时按需加载 SKILL.md 的人设部分，
+ * 而本类负责在后端预处理分类配置（skill.meta.yml），并在生成 Prompt 时批量注入 references。
  */
 @Slf4j
 @Service
@@ -58,16 +69,16 @@ public class InterviewSkillService {
     private final PromptTemplate jdSystemPromptTemplate;
     private final ResourceLoader resourceLoader;
 
-    /** 预设 Skill 注册表，启动时从 classpath:skills/{skillId}/SKILL.md 加载 */
+    /** 预设 Skill 注册表，启动时从 classpath:skills/{skillId}/SKILL.md 加载，使用 TreeMap 保证有序性 */
     private final Map<String, InterviewSkillProperties.SkillDefinition> presetRegistry = new TreeMap<>();
 
-    /** 参考内容缓存（classpath 资源不可变，加载一次后复用） */
+    /** 参考内容缓存（classpath 资源不可变，加载一次后复用，避免重复 IO） */
     private final Map<String, String> referenceCache = new ConcurrentHashMap<>();
 
-    /** 全局 category key → (ref文件名, 是否shared) 映射，启动时构建，之后只读 */
+    /** 全局 category key → (ref文件名, 是否shared) 映射，启动时构建，之后只读，用于快速查找参考文件路径 */
     private final Map<String, RefMapping> categoryRefIndex = new HashMap<>();
 
-    /** JD 解析用的参考文件清单 Markdown 表格，启动时生成一次 */
+    /** JD 解析用的参考文件清单 Markdown 表格，启动时生成一次，作为 LLM 解析 JD 时的上下文提示 */
     private String cachedReferenceFileList;
 
     record RefMapping(String ref, boolean shared, String sourceSkillId) {}
@@ -84,6 +95,7 @@ public class InterviewSkillService {
 
     @PostConstruct
     void loadPresetSkills() throws IOException {
+        // 扫描 classpath:skills/ 目录下所有的 SKILL.md 文件
         var resolver = new PathMatchingResourcePatternResolver();
         Resource[] resources = resolver.getResources("classpath:skills/*/SKILL.md");
         Yaml yaml = new Yaml();
@@ -94,6 +106,7 @@ public class InterviewSkillService {
                 continue;
             }
 
+            // 解析 Skill 定义（包含 front matter 中的 name/description 以及 body 中的 persona）
             InterviewSkillProperties.SkillDefinition def = parseSkillDefinition(skillId, resource, yaml);
             if (def.getName() == null || def.getName().isBlank()) {
                 log.warn("跳过无效 Skill（缺少 name）: {}", skillId);
@@ -106,10 +119,19 @@ public class InterviewSkillService {
 
         log.info("共加载 {} 个预设 Skill", presetRegistry.size());
 
+        // 构建分类到参考文件的索引，方便后续根据分类名快速找到对应的知识点文件
         buildCategoryRefIndex();
+        // 预生成参考文件列表的 Markdown 表格，供 JD 解析时使用
         cachedReferenceFileList = buildReferenceFileList();
     }
 
+    /**
+     * 构建分类到参考文件的映射索引
+     * <p>
+     * 遍历所有预设 Skill 的分类配置，提取出每个分类对应的参考文件名（ref）。
+     * 这个索引是后续“知识点注入”的核心依据。
+     * </p>
+     */
     private void buildCategoryRefIndex() {
         categoryRefIndex.clear();
         for (var entry : presetRegistry.entrySet()) {
@@ -169,6 +191,20 @@ public class InterviewSkillService {
             false, jdText, null, null);
     }
 
+    /**
+     * 从 JD 文本中解析出面试考核维度
+     * <p>
+     * 调用 LLM 分析职位描述，提取出关键技术点和能力要求，并将其映射到系统已有的分类体系中。
+     * </p>
+     *
+     * <b>处理流程</b>：
+     * <ol>
+     *   <li>校验 JD 长度，防止过短文本导致解析失败</li>
+     *   <li>渲染 System Prompt，注入当前可用的参考文件列表作为上下文</li>
+     *   <li>调用 LLM 进行结构化输出，返回 {@code CategoryListDTO}</li>
+     *   <li>统计匹配到的参考文件数量，用于日志监控</li>
+     * </ol>
+     */
     public List<CategoryDTO> parseJd(String jdText) {
         if (jdText == null || jdText.length() < MIN_JD_LENGTH) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "JD 内容太少（至少 " + MIN_JD_LENGTH + " 字），请补充后重试");
@@ -237,6 +273,19 @@ public class InterviewSkillService {
         return calculateAllocation(getSkill(skillId).categories(), totalQuestions);
     }
 
+    /**
+     * 计算题目在不同考核维度间的分配方案
+     * <p>
+     * 采用“保底 + 轮转”的策略，确保重要考点不被遗漏，同时合理分配题量。
+     * </p>
+     *
+     * <b>分配逻辑</b>：
+     * <ol>
+     *   <li><b>Phase 1</b>：给标记为 {@code ALWAYS_ONE} 的分类各分配 1 题（如：自我介绍）</li>
+     *   <li><b>Phase 2</b>：给所有剩余分类（CORE 优先）各分配 1 题，保证覆盖面</li>
+     *   <li><b>Phase 3</b>：如果还有剩余名额，按 CORE → Normal 的顺序循环追加题目</li>
+     * </ol>
+     */
     public Map<String, Integer> calculateAllocation(List<SkillCategoryDTO> categories, int totalQuestions) {
         List<SkillCategoryDTO> alwaysOneCats = new ArrayList<>();
         List<SkillCategoryDTO> coreCats = new ArrayList<>();
@@ -290,7 +339,7 @@ public class InterviewSkillService {
             if (coreCats.isEmpty() && normalCats.isEmpty()) break;
         }
 
-        // 确保所有类目都出现在 allocation 中
+        // 确保所有类目都出现在 allocation 中（即使题量为 0）
         for (SkillCategoryDTO cat : coreCats) {
             allocation.putIfAbsent(cat.key(), 0);
         }
@@ -302,22 +351,42 @@ public class InterviewSkillService {
         return allocation;
     }
 
+/**
+ * 根据技能类别分配情况构建描述字符串
+ *
+ * @param allocation 技能类别分配映射表，键为类别键，值为题目数量
+ * @param categories 技能类别DTO列表，包含类别标签和优先级等信息
+ * @return 返回格式化的分配描述字符串，每行显示一个类别的分配情况
+ */
     public String buildAllocationDescription(Map<String, Integer> allocation, List<SkillCategoryDTO> categories) {
+    // 使用StringBuilder来高效构建字符串
         StringBuilder sb = new StringBuilder();
+    // 遍历所有技能类别
         for (SkillCategoryDTO cat : categories) {
+        // 获取当前类别的分配数量，如果不存在则默认为0
             int count = allocation.getOrDefault(cat.key(), 0);
+        // 如果分配数量大于0，则添加到描述字符串中
             if (count > 0) {
+            // 按照指定格式添加类别信息：类别标签 | 题目数量 | 优先级 |
                 sb.append("| ").append(cat.label()).append(" | ").append(count).append(" 题 | ").append(cat.priority()).append(" |\n");
             }
         }
+    // 返回构建好的描述字符串
         return sb.toString();
     }
 
+/**
+ * 构建参考部分的方法
+ * @param skill 技能数据传输对象，包含技能相关信息
+ * @param allocation 一个映射表，存储类别与对应的分配数量
+ * @return 返回构建好的参考部分字符串
+ */
     public String buildReferenceSection(SkillDTO skill, Map<String, Integer> allocation) {
+    // 调用内部方法构建参考部分，传入技能对象、过滤条件和最大字符限制
         return buildReferenceSectionInternal(
-            skill,
-            category -> allocation.getOrDefault(category.key(), 0) > 0,
-            MAX_REFERENCE_SECTION_CHARS
+            skill,  // 技能数据传输对象
+            category -> allocation.getOrDefault(category.key(), 0) > 0,  // Lambda表达式，用于过滤分配数量大于0的类别
+            MAX_REFERENCE_SECTION_CHARS  // 参考部分的最大字符数限制
         );
     }
 
@@ -348,45 +417,68 @@ public class InterviewSkillService {
         }
     }
 
-    private String buildReferenceSectionInternal(SkillDTO skill,
-                                                 Predicate<SkillCategoryDTO> categoryFilter,
-                                                 int maxChars) {
-        StringBuilder sb = new StringBuilder();
+    /**
+     * 内部方法：根据过滤器构建参考内容片段
+     * <p>
+     * 该方法负责从文件系统读取 Markdown 格式的参考资料，并按分类组装成 Prompt 的一部分。
+     * </p>
+     *
+     * <b>关键逻辑</b>：
+     * <ul>
+     *   <li><b>Custom Skill 路径修正</b>：如果是自定义 Skill，需要根据 categoryKey 反查原始 Skill ID 来定位文件</li>
+     *   <li><b>字符数限制</b>：防止注入的内容过长导致 LLM Context Window 溢出，超过阈值会自动截断</li>
+     *   <li><b>缓存命中</b>：通过 {@code referenceCache} 避免重复读取磁盘文件</li>
+     * </ul>
+     */
+    private String buildReferenceSectionInternal(SkillDTO skill,  // 技能数据传输对象，包含技能的基本信息和分类信息
+                                                 Predicate<SkillCategoryDTO> categoryFilter,  // 分类过滤器，用于筛选需要处理的技能分类
+                                                 int maxChars) {  // 最大允许的字符数，用于控制输出长度
+        StringBuilder sb = new StringBuilder();  // 使用 StringBuilder 高效构建字符串结果
 
+    // 遍历技能的所有分类
         for (SkillCategoryDTO category : skill.categories()) {
+        // 使用过滤器测试当前分类，不符合则跳过
             if (!categoryFilter.test(category)) {
                 continue;
             }
+        // 如果分类没有引用内容或引用内容为空，则跳过
             if (category.ref() == null || category.ref().isBlank()) {
                 continue;
             }
 
             // custom 模式下非 shared 的 ref 需要查原始 skillId 拼路径
-            String effectiveSkillId = skill.id();
+            String effectiveSkillId = skill.id();  // 默认使用当前技能ID
+        // 如果是自定义技能且分类不是共享的，需要查找原始技能ID
             if (CUSTOM_SKILL_ID.equals(skill.id()) && !category.shared() && category.ref() != null) {
+            // 从分类引用索引中查找映射关系
                 RefMapping mapping = categoryRefIndex.get(category.key());
                 if (mapping != null) {
-                    effectiveSkillId = mapping.sourceSkillId();
+                    effectiveSkillId = mapping.sourceSkillId();  // 使用原始技能ID
                 }
             }
+        // 加载引用内容
             String referenceContent = loadReferenceContent(effectiveSkillId, category.ref(), category.shared());
             if (referenceContent.isBlank()) {
-                continue;
+                continue;  // 如果加载的内容为空，则跳过
             }
 
+        // 如果结果不为空，添加分隔符
             if (!sb.isEmpty()) {
                 sb.append("\n\n");
             }
+        // 添加分类标题和内容
             sb.append("### ").append(category.label()).append(" (").append(category.key()).append(")\n");
             sb.append(referenceContent);
 
+        // 检查是否超过最大字符数限制
             if (sb.length() >= maxChars) {
-                sb.setLength(maxChars);
-                sb.append("\n...（references 已截断）");
-                break;
+                sb.setLength(maxChars);  // 截断到最大长度
+                sb.append("\n...（references 已截断）");  // 添加截断标记
+                break;  // 超出限制后停止处理
             }
         }
 
+    // 如果结果为空，返回默认提示信息
         return sb.isEmpty() ? "未配置 references。" : sb.toString();
     }
 
@@ -395,42 +487,65 @@ public class InterviewSkillService {
         return resource.getContentAsString(StandardCharsets.UTF_8);
     }
 
+/**
+ * 解析技能定义的方法，从资源文件中读取并解析技能的 front matter 和内容
+ * @param skillId 技能的唯一标识符
+ * @param resource 包含技能定义的资源文件
+ * @param yaml YAML解析器实例，用于解析front matter
+ * @return 解析后的技能定义对象
+ * @throws BusinessException 当文件格式错误或读取失败时抛出
+ */
     private InterviewSkillProperties.SkillDefinition parseSkillDefinition(String skillId, Resource resource, Yaml yaml) {
         try {
+        // 读取资源文件内容为字符串，使用UTF-8编码
             String markdown = resource.getContentAsString(StandardCharsets.UTF_8);
+        // 使用正则表达式匹配front matter模式
             Matcher matcher = FRONT_MATTER_PATTERN.matcher(markdown);
+        // 检查是否匹配到front matter
             if (!matcher.matches()) {
+            // 如果没有匹配到，抛出业务异常，提示文件格式错误
                 throw new BusinessException(ErrorCode.BAD_REQUEST,
                     "Skill 文件格式错误（缺少 front matter）: " + resource.getDescription());
             }
 
+        // 获取front matter部分内容
             String frontMatter = matcher.group(1);
+        // 获取并处理body部分内容，去除首尾空白
             String body = matcher.group(2) != null ? matcher.group(2).trim() : "";
 
+        // 将front matter内容解析为SkillFrontMatterDefinition对象
             InterviewSkillProperties.SkillFrontMatterDefinition frontMatterDef =
                 yaml.loadAs(frontMatter, InterviewSkillProperties.SkillFrontMatterDefinition.class);
 
+        // 创建技能定义对象
             InterviewSkillProperties.SkillDefinition definition = new InterviewSkillProperties.SkillDefinition();
+        // 如果front matter定义不为空，设置名称和描述
             if (frontMatterDef != null) {
                 definition.setName(frontMatterDef.getName());
                 definition.setDescription(frontMatterDef.getDescription());
             }
+        // 如果body部分不为空，设置persona
             if (!body.isBlank()) {
                 definition.setPersona(body);
             }
 
+        // 加载技能的元定义信息
             InterviewSkillProperties.SkillMetaDefinition metaDef = loadSkillMetaDefinition(skillId, yaml);
+        // 如果元定义不为空，设置显示名称、显示信息和分类
             if (metaDef != null) {
                 definition.setDisplayName(metaDef.getDisplayName());
                 definition.setDisplay(metaDef.getDisplay());
                 definition.setCategories(metaDef.getCategories());
             }
 
+        // 确保分类不为null，如果为null则设置为空列表
             if (definition.getCategories() == null) {
                 definition.setCategories(List.of());
             }
+        // 返回完整的技能定义
             return definition;
         } catch (IOException e) {
+        // 如果发生IO异常，抛出业务异常，提示读取文件失败
             throw new BusinessException(ErrorCode.INTERNAL_ERROR,
                 "读取 Skill 文件失败: " + resource.getDescription());
         }

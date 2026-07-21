@@ -70,15 +70,18 @@ public class StructuredOutputInvoker {
         String contextTag = normalizeContextTag(logContext);
         Exception lastError = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            // 步骤 A：根据尝试次数选择系统提示词
             String attemptSystemPrompt = attempt == 1
                 ? systemPromptWithFormat
                 : buildRetrySystemPrompt(systemPromptWithFormat, lastError);
             try {
+                // 步骤 B：调用 LLM 并解析结构化输出
                 T result = chatClient.prompt()
                     .system(attemptSystemPrompt)
                     .user(userPrompt)
                     .call()
-                    .entity(outputConverter);
+                    .entity(outputConverter); // 使用 BeanOutputConverter 解析为 Java 对象
+                // 步骤 C：成功则记录指标并返回
                 recordAttempt(contextTag, STATUS_SUCCESS);
                 recordInvocation(contextTag, STATUS_SUCCESS, startNanos);
                 return result;

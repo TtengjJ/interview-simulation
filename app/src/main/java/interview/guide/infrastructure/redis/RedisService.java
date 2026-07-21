@@ -238,13 +238,14 @@ public class RedisService {
 
         RStream<String, String> stream = redissonClient.getStream(streamKey, StringCodec.INSTANCE);
 
-        // 使用阻塞读取，让 Redis 服务端等待消息
+        // 使用阻塞读取，让 Redis 服务端等待消息（关键）
         Map<StreamMessageId, Map<String, String>> messages;
         try {
             messages = stream.readGroup(
                 groupName,
                 consumerName,
-                StreamReadGroupArgs.neverDelivered()
+                // 阻塞式读取
+                StreamReadGroupArgs.neverDelivered()// 只读取从未分配的消息
                     .count(count)
                     .timeout(Duration.ofMillis(blockTimeoutMs))
             );
@@ -289,7 +290,7 @@ public class RedisService {
     }
 
     /**
-     * 发送消息到 Stream（带长度限制）
+     * 发送消息到 Stream（带长度限制），生产者
      *
      * @param streamKey Stream 键
      * @param message   消息内容
@@ -297,13 +298,19 @@ public class RedisService {
      * @return 消息ID
      */
     public String streamAdd(String streamKey, Map<String, String> message, int maxLen) {
+        // 获取Redis Stream对象，使用字符串编解码器
         RStream<String, String> stream = redissonClient.getStream(streamKey, StringCodec.INSTANCE);
+        // 创建Stream添加参数，并设置消息内容
         StreamAddArgs<String, String> args = StreamAddArgs.entries(message);
+        // 如果设置了最大长度限制，则添加裁剪参数，非严格模式裁剪旧消息
         if (maxLen > 0) {
             args.trimNonStrict().maxLen(maxLen);
         }
+        // 向Stream中添加消息，并获取消息ID
         StreamMessageId messageId = stream.add(args);
+        // 记录调试日志
         log.debug("发送 Stream 消息: stream={}, messageId={}, maxLen={}", streamKey, messageId, maxLen);
+        // 返回消息ID的字符串形式
         return messageId.toString();
     }
 

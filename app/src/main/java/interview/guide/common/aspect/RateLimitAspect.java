@@ -51,6 +51,7 @@ public class RateLimitAspect {
 
     @jakarta.annotation.PostConstruct
     public void init() {
+        // 初始化 RedisScript,把脚本加载到 Redis 中
         rScript = redissonClient.getScript(StringCodec.INSTANCE);
         loadScript();
     }
@@ -66,40 +67,51 @@ public class RateLimitAspect {
     @Around("@annotation(interview.guide.common.annotation.RateLimit) || " +
             "@annotation(interview.guide.common.annotation.RateLimit.Container)")
     public Object around(ProceedingJoinPoint joinPoint) throws Throwable {
+        //  获取方法信息
         MethodSignature signature = (MethodSignature) joinPoint.getSignature();
         Method method = signature.getMethod();
         String className = method.getDeclaringClass().getSimpleName();
         String methodName = method.getName();
 
+        // 获取限流规则
         RateLimit[] rules = method.getAnnotationsByType(RateLimit.class);
         long nowMs = System.currentTimeMillis();
         String requestId = UUID.randomUUID().toString();
 
+        // 逐条执行限流规则
         for (RateLimit rule : rules) {
+            // 3a: 计算时间窗口（毫秒）
             long intervalMs = calculateIntervalMs(rule.interval(), rule.timeUnit());
+
+            // 3b: 生成 Redis Key
             String key = generateKey(className, methodName, rule.dimension());
 
+            // 3c: 执行 Lua 脚本进行限流判断
             Long result = executeRateLimitScript(key, nowMs, requestId, intervalMs, rule.count());
 
+            // 3d: 如果限流失败（result == 0），立即拒绝
             if (result == null || result == 0) {
                 return handleRateLimitExceeded(joinPoint, rule, key);
             }
         }
 
+        // 4: 放行
         return joinPoint.proceed();
     }
 
+    //
     private Long executeRateLimitScript(String key, long nowMs, String requestId, long intervalMs, double count) {
         List<Object> keysList = Collections.singletonList(key);
         Object[] args = {
-                String.valueOf(nowMs),
-                String.valueOf(1),
-                String.valueOf(intervalMs),
-                String.valueOf(count),
-                requestId
+                String.valueOf(nowMs),       // ARGV[1]: 当前时间戳
+                String.valueOf(1),         // ARGV[2]: 申请令牌数（固定为1）
+                String.valueOf(intervalMs),  // ARGV[3]: 时间窗口
+                String.valueOf(count),       // ARGV[4]: 最大令牌数
+                requestId                    // ARGV[5]: 请求ID
         };
 
         try {
+            // 执行 Lua 脚本（高效）
             Object resultObj = rScript.evalSha(
                     RScript.Mode.READ_WRITE,
                     luaScriptSha,
@@ -125,6 +137,7 @@ public class RateLimitAspect {
         }
     }
 
+    // 时间单位转换
     private long calculateIntervalMs(long interval, RateLimit.TimeUnit unit) {
         return switch (unit) {
             case MILLISECONDS -> interval;
@@ -152,6 +165,7 @@ public class RateLimitAspect {
     }
 
     private String generateKey(String className, String methodName, RateLimit.Dimension dimension) {
+        //hashTag决定分片位置,保证同一方法的不同维度限流数据在同一分片
         String hashTag = "{" + className + ":" + methodName + "}";
         String keyPrefix = "ratelimit:" + hashTag;
 
@@ -242,6 +256,7 @@ public class RateLimitAspect {
     }
 
     private String getCurrentUserId() {
+        // 从请求中获取当前用户ID,attributes是请求属性
         ServletRequestAttributes attributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
         if (attributes == null) {
             return "anonymous";

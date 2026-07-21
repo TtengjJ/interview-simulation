@@ -236,6 +236,7 @@ public class KnowledgeBaseQueryService {
                     .content();
 
             log.info("开始流式输出知识库回答(探测窗口): kbIds={}", knowledgeBaseIds);
+            // ⑧ 归一化处理（探测"无结果"模式）+ 错误兜底
             return normalizeStreamOutput(responseFlux)
                 .doOnComplete(() -> log.info("流式输出完成: kbIds={}", knowledgeBaseIds))
                 .onErrorResume(e -> {
@@ -272,7 +273,7 @@ public class KnowledgeBaseQueryService {
         return question == null ? "" : question.trim();
     }
 
-//    向量检索
+//    向量检索,候选查询检索
     private List<Document> retrieveRelevantDocs(QueryContext queryContext, List<Long> knowledgeBaseIds) {
         for (String candidateQuery : queryContext.candidateQueries()) {
             if (candidateQuery.isBlank()) {
@@ -292,6 +293,7 @@ public class KnowledgeBaseQueryService {
         return List.of();
     }
 
+    // 动态参数解析
     private SearchParams resolveSearchParams(String question) {
         int compactLength = question.replaceAll("\\s+", "").length();
         if (compactLength <= shortQueryLength) {
@@ -303,7 +305,7 @@ public class KnowledgeBaseQueryService {
         return new SearchParams(topkLong, minScoreDefault);
     }
 
-//    改写
+//    改写,执行查询重写
     private String rewriteQuestion(String question, List<Message> history) {
         if (!rewriteEnabled || question.isBlank()) {
             return question;
@@ -353,6 +355,7 @@ public class KnowledgeBaseQueryService {
         return sb.toString().trim();
     }
 
+    // 短 token 确认
     private boolean hasEffectiveHit(List<Document> docs) {
         return docs != null && !docs.isEmpty();
     }

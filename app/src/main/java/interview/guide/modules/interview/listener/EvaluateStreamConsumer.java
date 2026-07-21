@@ -25,7 +25,18 @@ import java.util.Optional;
 
 /**
  * 面试评估 Stream 消费者
- * 负责从 Redis Stream 消费消息并执行评估
+ * <p>
+ * 负责从 Redis Stream 消费评估任务，调用 LLM 生成结构化报告并持久化。
+ * </p>
+ *
+ * <b>核心职责</b>：
+ * <ul>
+ *   <li><b>消息解析</b>：从 Stream 中提取 Session ID</li>
+ *   <li><b>数据组装</b>：将用户回答回填到题目列表中，构建完整的 Q&A 上下文</li>
+ *   <li><b>LLM 评估</b>：调用 {@code AnswerEvaluationService} 执行批量打分与反馈生成</li>
+ *   <li><b>状态管理</b>：实时更新数据库中的评估进度（PROCESSING -> COMPLETED/FAILED）</li>
+ *   <li><b>失败重试</b>：处理异常时的自动重试入队逻辑</li>
+ * </ul>
  */
 @Slf4j
 @Component
@@ -80,6 +91,12 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
         return "evaluate-consumer";
     }
 
+    /**
+     * 解析 Stream 消息体
+     * <p>
+     * 校验消息格式，如果缺少必要的 Session ID 则返回 null，父类会自动 ACK 丢弃该脏数据。
+     * </p>
+     */
     @Override
     protected EvaluatePayload parsePayload(StreamMessageId messageId, Map<String, String> data) {
         String sessionId = data.get(AsyncTaskStreamConstants.FIELD_SESSION_ID);
@@ -95,11 +112,34 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
         return "sessionId=" + payload.sessionId();
     }
 
+    /**
+     * 标记任务开始处理
+     * <p>
+     * 在正式执行耗时的 LLM 调用前，先将状态更新为 PROCESSING，
+     * 方便前端感知任务已进入队列并开始执行。
+     * </p>
+     */
     @Override
     protected void markProcessing(EvaluatePayload payload) {
         updateEvaluateStatus(payload.sessionId(), AsyncTaskStatus.PROCESSING, null);
     }
 
+    /**
+     * 执行核心业务逻辑：生成评估报告
+     * <p>
+     * <b>处理流程</b>：
+     * <ol>
+     *   <li><b>加载会话</b>：从 DB 获取包含简历信息的完整会话实体</li>
+     *   <li><b>反序列化题目</b>：将 JSON 格式的题目列表还原为 Java 对象</li>
+     *   <li><b>合并答案</b>：遍历 {@code InterviewAnswerEntity}，将用户的真实回答填入对应的题目对象中</li>
+     *   <li><b>LLM 评估</b>：调用 {@code evaluationService.evaluateInterview} 进行多维度打分</li>
+     *   <li><b>持久化结果</b>：将生成的 {@code InterviewReportDTO} 存入数据库</li>
+     * </ol>
+     * </p>
+     *
+     * <b>防御性编程</b>：
+     * 如果会话已被删除（例如用户在评估期间手动清理了数据），则直接返回并 ACK 消息，避免空指针异常。
+     */
     @Override
     protected void processBusiness(EvaluatePayload payload) {
         String sessionId = payload.sessionId();
@@ -115,6 +155,7 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
             new TypeReference<>() {}
         );
 
+        // 将用户的回答回填到题目列表中，构建完整的 Q&A 对供 LLM 评估
         List<InterviewAnswerEntity> answers = persistenceService.findAnswersBySessionId(sessionId);
         for (InterviewAnswerEntity answer : answers) {
             int index = answer.getQuestionIndex();
@@ -124,7 +165,7 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
             }
         }
 
-        // 获取 LLM 客户端
+        // 获取 LLM 客户端并执行评估
         String provider = session.getLlmProvider();
         ChatClient chatClient = llmProviderRegistry.getChatClientOrDefault(provider);
 
@@ -143,6 +184,13 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
         updateEvaluateStatus(payload.sessionId(), AsyncTaskStatus.FAILED, error);
     }
 
+    /**
+     * 消息重试入队逻辑
+     * <p>
+     * 当评估过程中发生非致命异常时，将消息重新写入 Stream 尾部。
+     * 每次重试都会增加 {@code retryCount}，父类会限制最大重试次数（通常为 3 次）。
+     * </p>
+     */
     @Override
     protected void retryMessage(EvaluatePayload payload, int retryCount) {
         String sessionId = payload.sessionId();

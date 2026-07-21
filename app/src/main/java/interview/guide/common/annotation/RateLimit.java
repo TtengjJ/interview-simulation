@@ -24,9 +24,9 @@ import java.lang.annotation.Target;
  *
  * @see RateLimitAspect
  */
-@Target(ElementType.METHOD)
-@Retention(RetentionPolicy.RUNTIME)
-@Repeatable(RateLimit.Container.class)
+@Target(ElementType.METHOD)//方法注解
+@Retention(RetentionPolicy.RUNTIME)//运行时注解
+@Repeatable(RateLimit.Container.class)//可重复注解
 public @interface RateLimit {
 
     /**

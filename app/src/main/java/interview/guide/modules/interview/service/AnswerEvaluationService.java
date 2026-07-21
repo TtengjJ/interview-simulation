@@ -10,6 +10,7 @@ import interview.guide.modules.interview.model.InterviewReportDTO;
 import interview.guide.modules.interview.model.InterviewReportDTO.CategoryScore;
 import interview.guide.modules.interview.model.InterviewReportDTO.QuestionEvaluation;
 import interview.guide.modules.interview.model.InterviewReportDTO.ReferenceAnswer;
+import interview.guide.modules.interview.model.InterviewSessionEntity;
 import interview.guide.modules.interview.skill.InterviewSkillService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -54,7 +55,7 @@ public class AnswerEvaluationService {
 
             String referenceContext = skillService.buildEvaluationReferenceSectionSafe(
                 persistenceService.findBySessionId(sessionId)
-                    .map(s -> s.getSkillId())
+                    .map(InterviewSessionEntity::getSkillId)
                     .orElse(null)
             );
 

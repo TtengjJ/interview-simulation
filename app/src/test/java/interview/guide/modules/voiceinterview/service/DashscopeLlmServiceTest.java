@@ -1,6 +1,7 @@
 package interview.guide.modules.voiceinterview.service;
 
 import interview.guide.modules.resume.repository.ResumeRepository;
+import interview.guide.modules.voiceinterview.config.VoiceInterviewProperties;
 import interview.guide.modules.voiceinterview.model.VoiceInterviewSessionEntity;
 import interview.guide.modules.voiceinterview.service.VoiceInterviewPromptService.RolePrompt;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,12 +53,14 @@ class DashscopeLlmServiceTest {
 
     private DashscopeLlmService dashscopeLlmService;
 
+    private VoiceInterviewProperties voiceInterviewProperties;
     private RolePrompt mockRolePrompt;
     private VoiceInterviewSessionEntity mockSession;
 
+
     @BeforeEach
     void setUp() {
-        dashscopeLlmService = new DashscopeLlmService(llmProviderRegistry, promptService, resumeRepository);
+        dashscopeLlmService = new DashscopeLlmService(llmProviderRegistry, promptService, resumeRepository,voiceInterviewProperties);
         // Setup mock role prompt
         mockRolePrompt = new RolePrompt();
         mockRolePrompt.setRoleType("ali-p8");

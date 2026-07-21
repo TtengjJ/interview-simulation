@@ -26,6 +26,7 @@ public class AgentUtilsConfiguration {
         this.agentUtilsProperties = agentUtilsProperties;
     }
 
+    //检查目录是否存在，以及把目录资源传给 SkillsTool 构建 ToolCallback
     @Bean("interviewSkillsToolCallback")
     public ToolCallback interviewSkillsToolCallback() {
         String configuredSkillsRoot = agentUtilsProperties.getSkillsRoot();

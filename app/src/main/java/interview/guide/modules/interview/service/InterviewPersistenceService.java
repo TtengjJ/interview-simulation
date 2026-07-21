@@ -329,6 +329,7 @@ public class InterviewPersistenceService {
         log.info("加载历史题目: skillId={}, resumeId={}, 查到 {} 个历史会话", skillId, resumeId, sessions.size());
 
         LinkedHashSet<String> seen = new LinkedHashSet<>();
+        // 从历史会话中提取问题：解析JSON → 过滤追问 → 构建结构化对象 → 按问题文本去重 → 限制数量
         List<HistoricalQuestion> result = sessions.stream()
             .map(InterviewSessionEntity::getQuestionsJson)
             .filter(json -> json != null && !json.isEmpty())
