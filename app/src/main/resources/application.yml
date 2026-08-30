@@ -25,6 +25,8 @@ spring:
     import: optional:classpath:voice-interview-opening.yml
   application:
     name: ai-interview-platform
+  profiles:
+    default: dev
 
   # 启用虚拟线程 (Java 21+)
   # 显著提升 I/O 密集型场景的并发能力，特别适合 AI 调用和 SSE 长连接
@@ -80,18 +82,36 @@ spring:
       api-key: ${AI_BAILIAN_API_KEY}
       chat:
         options:
-          model: ${AI_MODEL:qwen-plus}
+          model: ${AI_MODEL:qwen3.7-plus}
           temperature: 0.2
       # Embedding模型配置 - 使用text-embedding-v3
       embedding:
         options:
           model: text-embedding-v3
+    chat:
+      observations:
+        # 写入 Observation Context；Langfuse 展示还需 ChatModelCompletionContentObservationFilter
+        # 默认与 .env.dev 对齐（全量记录）；生产用 .env.prod 覆盖为 false
+        log-prompt: ${LANGFUSE_LOG_PROMPT:true}
+        log-completion: ${LANGFUSE_LOG_COMPLETION:true}
+        include-error-logging: ${LANGFUSE_INCLUDE_ERROR_LOGGING:true}
+      client:
+        observations:
+          log-prompt: ${LANGFUSE_LOG_PROMPT:true}
+          log-completion: ${LANGFUSE_LOG_COMPLETION:true}
+    tools:
+      observations:
+        # Tool 入参/出参写入 span，便于在 Langfuse 查看 Agent 工具调用
+        include-content: ${LANGFUSE_LOG_TOOL_CONTENT:true}
     # 禁用自动重试机制，让异常立即返回
     retry:
       max-attempts: 1  # 不重试，失败立即返回
       on-client-errors: false
     # PostgreSQL Vector Store配置
     vectorstore:
+      observations:
+        # RAG 检索返回文档写入 span（开发便于排查；生产可关）
+        log-query-response: ${LANGFUSE_LOG_VECTORSTORE_RESPONSE:true}
       pgvector:
         index-type: HNSW
         distance-type: COSINE_DISTANCE
@@ -99,8 +119,43 @@ spring:
         initialize-schema: true # 开发环境设置为 true，方便快速启动。生产环境设置为 false，手动管理数据库 schema，避免意外变更。
         remove-existing-vector-store-table: false  # 保留现有表和数据
 
+# Actuator + OpenTelemetry → Langfuse（默认与 .env.dev 对齐）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  tracing:
+    sampling:
+      probability: ${LANGFUSE_SAMPLING_PROBABILITY:1.0}
+    export:
+      otlp:
+        enabled: ${LANGFUSE_ENABLED:true}
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          # Self-hosted 默认；Cloud 见 .env 注释（EU/US）
+          endpoint: ${LANGFUSE_OTLP_ENDPOINT:http://localhost:3000/api/public/otel/v1/traces}
+          transport: http
+  observations:
+    annotations:
+      enabled: true
+    enable:
+      "http.server.requests": false
+      "http.client.requests": false
+
 # Application custom configuration
 app:
+  langfuse:
+    enabled: ${LANGFUSE_ENABLED:true}
+    public-key: ${LANGFUSE_PUBLIC_KEY:pk-lf-68335318-6fb8-40a1-a72d-70838461e489}
+    secret-key: ${LANGFUSE_SECRET_KEY:sk-lf-f31bd0f2-fca9-42ac-8a01-302a617d82d7}
+    otlp-endpoint: ${LANGFUSE_OTLP_ENDPOINT:http://localhost:3000/api/public/otel/v1/traces}
   ai:
     default-provider: dashscope
     agent-utils:
@@ -109,7 +164,7 @@ app:
       dashscope:
         base-url: https://dashscope.aliyuncs.com/compatible-mode
         api-key: ${AI_BAILIAN_API_KEY}
-        model: qwen-plus
+        model: qwen3.7-plus
       lmstudio:
         base-url: http://localhost:1234
         api-key: lm-studio

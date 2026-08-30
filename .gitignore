@@ -6,8 +6,14 @@ build
 /.claude
 /.idea
 /app/bin
-# Environment variables
+# Environment variables (secrets). Keep *.example templates committed.
 .env
+.env.dev
+.env.prod
+.env.local
+!.env.example
+!.env.dev.example
+!.env.prod.example
 test-output.txt
 # IDEA code analysis
 qodana.yaml

@@ -46,7 +46,19 @@ spring:
         initialize-schema: false
         remove-existing-vector-store-table: false
 
+management:
+  tracing:
+    export:
+      otlp:
+        enabled: false
+  otlp:
+    metrics:
+      export:
+        enabled: false
+
 app:
+  langfuse:
+    enabled: false
   ai:
     default-provider: dashscope
     providers:
