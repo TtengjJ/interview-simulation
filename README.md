@@ -11,24 +11,11 @@
 
 </div>
 
-
 ---
 
 ## 项目介绍
 
 InterviewGuide 是一个集成了简历分析、模拟面试（文字 + 语音）和知识库管理的智能面试辅助平台。系统利用大语言模型（LLM）、向量数据库和实时语音技术，为求职者和 HR 提供智能化的简历评估和面试练习服务。
-
-## 系统架构
-
-![系统架构图](https://oss.javaguide.cn/xingqiu/pratical-project/interview-guide/interview-guide-architecture-diagram.png)
-
-## 配套教程
-
-本项目承诺**完整功能免费开源**，也不会做所谓的 Pro 版或“付费解锁核心功能”之类的设计。
-
-如果你想学习这个项目，或者希望把它作为个人项目经历 / 毕设选题，我也整理了一套相对细致的教程：从基础设施搭建、核心业务实现，到最后如何在面试中讲清楚思路与亮点，尽量把容易卡住的地方讲透。
-
-如果你确实需要更系统的辅导，可以点这里了解详情（**教程为付费内容**，主要是想覆盖一些时间成本，望理解，感谢支持）：[《SpringAI 智能面试平台+RAG 知识库》](https://javaguide.cn/zhuanlan/interview-guide.html)。
 
 ## 技术栈
 
@@ -48,14 +35,6 @@ InterviewGuide 是一个集成了简历分析、模拟面试（文字 + 语音�
 | DashScope SDK         | 2.22.7 | 语音识别/合成（Qwen3 ASR/TTS）|
 | WebSocket             | -     | 语音面试实时双向通信          |
 | Gradle                | 8.14  | 构建工具                      |
-
-技术选型常见问题解答：
-
-1. 数据存储为什么选择 PostgreSQL + pgvector？PG 的向量数据存储功能够用了，精简架构，不想引入太多组件。
-2. 为什么引入 Redis？1
-   - Redis 替代 `ConcurrentHashMap` 实现面试会话的缓存。
-   - 基于 Redis Stream 实现简历分析、知识库向量化等场景的异步（还能解耦，分析和向量化可以使用其他编程语言来做）。不使用 [Kafka](https://javaguide.cn/high-performance/message-queue/kafka-questions-01.html) 这类成熟的消息队列，也是不想引入太多组件。
-3. 构建工具为什么选择 Gradle？个人更喜欢用 Gradle，也写过相关的文章：[Gradle核心概念总结](https://javaguide.cn/tools/gradle/gradle-core-concepts.html)。
 
 ### 前端技术
 
@@ -392,83 +371,3 @@ docker image prune -f
 | **求职者**      | 上传简历获取分析建议，进行模拟面试练习 |
 | **HR/招聘人员** | 批量分析简历，评估候选人能力           |
 | **培训机构**    | 提供面试培训服务，管理知识库资源       |
-
-## 常见问题
-
-### Q: 数据库表创建失败/数据丢失
-
-检查 JPA 的 `ddl-auto` 配置。`ddl-auto` 模式对比：
-
-| 模式     | 行为                            | 适用场景      | 数据保留 |
-| -------- | ------------------------------- | ------------- | -------- |
-| **update** | 智能模式：表不存在自动创建，存在则增量更新 | **开发环境（推荐）** | ✅ 保留 |
-| create   | 无条件删除并重建所有表          | 仅首次建表时使用 | ❌ 删除 |
-| validate | 只验证，不修改                  | 生产环境      | ✅ 保留 |
-| none     | 什么都不做                      | 生产环境      | ✅ 保留 |
-
-**推荐配置（已默认）**：
-
-```yaml
-jpa:
-  hibernate:
-    ddl-auto: update  # 首次启动自动创建表，后续保留数据并增量更新
-```
-
-⚠️ **注意**：避免使用 `create` 模式，否则每次重启都会删除所有数据！
-
-### Q: 知识库向量化失败
-
-当 `initialize-schema: false` 时，Spring AI **不会自动创建** `vector_store` 表。
-
-```java
-spring:
-  ai:
-    vectorstore:
-      pgvector:
-        initialize-schema: true 
-
-```
-
-建议开发环境设置为 true，方便快速启动。生产环境设置为 false，手动管理数据库 schema，避免意外变更。
-
-### Q: 简历分析失败
-
-检查一下阿里云 DashScope API KEY 是否配置正确（申请地址：<https://bailian.console.aliyun.com/>）。
-
-### Q: 简历分析一直显示"分析中"？
-
-检查 Redis 连接和 Stream Consumer 是否正常运行。查看后端日志确认是否有错误。
-
-### Q: PDF 导出失败或中文显示异常？
-
-项目已内置中文字体（珠圆玉润仿宋），支持跨平台导出。如遇到问题，请检查：
-- 字体文件是否存在：`app/src/main/resources/fonts/ZhuqueFangsong-Regular.ttf`
-- 检查日志中的字体加载信息
-- 确认 iText 依赖是否正确
-
-### Q: Windows PowerShell 下后端日志中文乱码？
-
-**原因简述**：后端与 Logback 按 **UTF-8** 输出日志；中文 Windows 下控制台默认多为 **GBK（代码页 936）**，且 PowerShell 的 `$OutputEncoding`、控制台编码若未统一为 UTF-8，显示时就会把同一串字节解释错，出现乱码。
-
-**本项目已做的配置**（一般无需再改）：根目录 `gradle.properties`（Gradle 进程 UTF-8）、`app/src/main/resources/logback-spring.xml`（控制台日志 UTF-8）、`app/build.gradle` 中 `bootRun` 的 JVM 参数（含 `file.encoding` / `stdout.encoding` / `stderr.encoding`）。
-
-**仍乱码时（PowerShell 侧）**：在启动 `./gradlew bootRun` 的同一终端先执行下面一段；或写入 **PowerShell 配置文件**（`$PROFILE`）以便每次自动生效：
-
-```powershell
-chcp 65001 | Out-Null
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-[Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
-$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-```
-
-新建或编辑配置文件：`if (!(Test-Path $PROFILE)) { New-Item -Path $PROFILE -ItemType File -Force }`，再 `notepad $PROFILE` 将上述内容粘贴保存；新开终端后生效，或执行 `. $PROFILE` 立即加载。若提示脚本无法执行，可执行一次：`Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`。
-
-在 PowerShell 中建议使用 `.\gradlew.bat :app:bootRun`（或仓库根目录的 `.\gradlew.bat`），避免与执行策略、路径解析相关的问题。
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 许可证
-
-AGPL-3.0 License（只要通过网络提供服务，就必须向用户公开修改后的源码）
