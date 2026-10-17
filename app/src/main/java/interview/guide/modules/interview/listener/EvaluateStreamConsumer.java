@@ -19,6 +19,8 @@ import org.springframework.stereotype.Component;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -214,6 +216,17 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
     }
 
     /**
+     * 交卷到当前时刻的毫秒数。没有交卷时间时返回 null。
+     */
+    private Long elapsedSinceSubmit(InterviewSessionEntity session) {
+        LocalDateTime submittedAt = session.getEvaluateSubmittedAt();
+        if (submittedAt == null) {
+            return null;
+        }
+        return Math.max(0, Duration.between(submittedAt, LocalDateTime.now()).toMillis());
+    }
+
+    /**
      * 更新评估状态
      */
     private void updateEvaluateStatus(String sessionId, AsyncTaskStatus status, String error) {
@@ -221,8 +234,16 @@ public class EvaluateStreamConsumer extends AbstractStreamConsumer<EvaluateStrea
             sessionRepository.findBySessionId(sessionId).ifPresent(session -> {
                 session.setEvaluateStatus(status);
                 session.setEvaluateError(error);
+                if (status == AsyncTaskStatus.COMPLETED) {
+                    Long durationMs = elapsedSinceSubmit(session);
+                    if (durationMs != null) {
+                        session.setEvaluateDurationMs(durationMs);
+                        log.info("评估耗时: sessionId={}, evaluateDurationMs={}", sessionId, durationMs);
+                    }
+                }
                 sessionRepository.save(session);
-                log.debug("评估状态已更新: sessionId={}, status={}", sessionId, status);
+                log.debug("评估状态已更新: sessionId={}, status={}, evaluateDurationMs={}",
+                    sessionId, status, session.getEvaluateDurationMs());
             });
         } catch (Exception e) {
             log.error("更新评估状态失败: sessionId={}, status={}, error={}", sessionId, status, e.getMessage(), e);

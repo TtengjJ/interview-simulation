@@ -98,6 +98,12 @@ public class InterviewSessionEntity {
     @Column(length = 500)
     private String evaluateError;
 
+    // 用户交卷时间（首次进入 PENDING 时写入，重试不覆盖）
+    private LocalDateTime evaluateSubmittedAt;
+
+    // 交卷到评估完成的耗时（毫秒），含排队与重试
+    private Long evaluateDurationMs;
+
     // LLM提供商
     @Column(length = 50)
     private String llmProvider = "dashscope";
@@ -253,6 +259,22 @@ public class InterviewSessionEntity {
 
     public void setEvaluateError(String evaluateError) {
         this.evaluateError = evaluateError;
+    }
+
+    public LocalDateTime getEvaluateSubmittedAt() {
+        return evaluateSubmittedAt;
+    }
+
+    public void setEvaluateSubmittedAt(LocalDateTime evaluateSubmittedAt) {
+        this.evaluateSubmittedAt = evaluateSubmittedAt;
+    }
+
+    public Long getEvaluateDurationMs() {
+        return evaluateDurationMs;
+    }
+
+    public void setEvaluateDurationMs(Long evaluateDurationMs) {
+        this.evaluateDurationMs = evaluateDurationMs;
     }
 
     public String getLlmProvider() {

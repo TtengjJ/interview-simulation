@@ -19,7 +19,8 @@ public record SessionListItemDTO(
     String evaluateError,
     Integer overallScore,
     LocalDateTime createdAt,
-    LocalDateTime completedAt
+    LocalDateTime completedAt,
+    Long evaluateDurationMs
 ) {
     public static SessionListItemDTO from(InterviewSessionEntity e) {
         return new SessionListItemDTO(
@@ -33,7 +34,8 @@ public record SessionListItemDTO(
             e.getEvaluateError(),
             e.getOverallScore(),
             e.getCreatedAt(),
-            e.getCompletedAt()
+            e.getCompletedAt(),
+            e.getEvaluateDurationMs()
         );
     }
 }

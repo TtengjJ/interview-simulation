@@ -20,6 +20,7 @@ export interface TextSessionMeta {
   overallScore: number | null;
   createdAt: string;
   completedAt: string | null;
+  evaluateDurationMs: number | null;
 }
 
 export const interviewApi = {

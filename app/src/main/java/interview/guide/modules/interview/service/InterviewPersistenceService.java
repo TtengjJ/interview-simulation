@@ -103,6 +103,10 @@ public class InterviewPersistenceService {
         if (sessionOpt.isPresent()) {
             InterviewSessionEntity session = sessionOpt.get();
             session.setEvaluateStatus(status);
+            if (status == AsyncTaskStatus.PENDING && session.getEvaluateSubmittedAt() == null) {
+                session.setEvaluateSubmittedAt(LocalDateTime.now());
+                session.setEvaluateDurationMs(null);
+            }
             if (error != null) {
                 session.setEvaluateError(error.length() > 500 ? error.substring(0, 500) : error);
             } else {

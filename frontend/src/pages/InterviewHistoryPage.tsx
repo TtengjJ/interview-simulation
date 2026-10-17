@@ -37,6 +37,7 @@ interface UnifiedInterviewItem {
   status: string;
   evaluateStatus?: string;
   evaluateError?: string;
+  evaluateDurationMs?: number | null;
   overallScore: number | null;
   totalQuestions?: number;
   actualDuration?: number;
@@ -84,11 +85,24 @@ function StatusIcon({ item }: { item: UnifiedInterviewItem }) {
 function getStatusText(item: UnifiedInterviewItem): string {
   if (isEvaluateFailed(item)) return '评估失败';
   if (isEvaluating(item)) return item.evaluateStatus === 'PROCESSING' ? '评估中' : '等待评估';
-  if (isEvaluateCompleted(item)) return '已完成';
+  if (isEvaluateCompleted(item)) {
+    return item.evaluateDurationMs != null
+      ? `已完成 · ${formatEvaluateDuration(item.evaluateDurationMs)}`
+      : '已完成';
+  }
   if (item.status === 'IN_PROGRESS') return '进行中';
   if (item.status === 'PAUSED') return '已暂停';
   if (isCompletedStatus(item.status)) return '已提交';
   return '已创建';
+}
+
+function formatEvaluateDuration(durationMs: number): string {
+  if (durationMs < 1000) return `${durationMs}毫秒`;
+  const seconds = durationMs / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}秒`;
+  const mins = Math.floor(seconds / 60);
+  const remain = Math.round(seconds % 60);
+  return `${mins}分${remain}秒`;
 }
 
 function formatDuration(seconds?: number): string {
@@ -162,7 +176,8 @@ function itemsEqual(a: UnifiedInterviewItem[], b: UnifiedInterviewItem[]): boole
   for (let i = 0; i < a.length; i++) {
     const ai = a[i], bi = b[i];
     if (ai.id !== bi.id || ai.status !== bi.status ||
-        ai.evaluateStatus !== bi.evaluateStatus || ai.overallScore !== bi.overallScore) return false;
+        ai.evaluateStatus !== bi.evaluateStatus || ai.overallScore !== bi.overallScore ||
+        ai.evaluateDurationMs !== bi.evaluateDurationMs) return false;
   }
   return true;
 }
@@ -243,6 +258,7 @@ export default function InterviewHistoryPage({ onBack: _onBack, onViewInterview,
         status: session.status,
         evaluateStatus: session.evaluateStatus ?? undefined,
         evaluateError: session.evaluateError ?? undefined,
+        evaluateDurationMs: session.evaluateDurationMs,
         overallScore: session.overallScore,
         totalQuestions: session.totalQuestions,
         createdAt: session.createdAt,
