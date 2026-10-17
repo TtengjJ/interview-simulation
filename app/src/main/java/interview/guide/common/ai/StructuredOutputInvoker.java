@@ -70,9 +70,9 @@ public class StructuredOutputInvoker {
         String contextTag = normalizeContextTag(logContext);
         Exception lastError = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            // 步骤 A：根据尝试次数选择系统提示词
+            // 步骤 A：根据尝试次数选择系统提示词（首轮即附加严格 JSON 约束，降低引号未转义等解析失败）
             String attemptSystemPrompt = attempt == 1
-                ? systemPromptWithFormat
+                ? systemPromptWithFormat + "\n\n" + STRICT_JSON_INSTRUCTION
                 : buildRetrySystemPrompt(systemPromptWithFormat, lastError);
             try {
                 // 步骤 B：调用 LLM 并解析结构化输出
